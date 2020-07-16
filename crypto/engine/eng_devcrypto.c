@@ -736,6 +736,183 @@ static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
 
 /******************************************************************************
  *
+ * Asymmetric
+ *
+ *****/
+
+static u_int32_t cryptodev_asymfeat = 0;
+
+static RSA_METHOD *devcrypto_rsa;
+
+static int bn2crparam(const BIGNUM *a, struct crparam *crp);
+static int crparam2bn(struct crparam *crp, BIGNUM *a);
+static int cryptodev_asym(struct crypt_kop *kop, int rlen, BIGNUM *r,
+                          int slen, BIGNUM *s);
+static void zapparams(struct crypt_kop *kop);
+
+/*
+ * Convert a BIGNUM to the representation that /dev/crypto needs.
+ * Upon completion of use, the caller is responsible for freeing
+ * crp->crp_p.
+ */
+static int bn2crparam(const BIGNUM *a, struct crparam *crp)
+{
+    ssize_t bytes, bits;
+    u_char *b;
+
+    crp->crp_p = NULL;
+    crp->crp_nbits = 0;
+
+    bits = BN_num_bits(a);
+    bytes = BN_num_bytes(a);
+
+    b = OPENSSL_zalloc(bytes);
+    if (b == NULL)
+        return (1);
+
+    crp->crp_p = (__u8 *) b;
+    crp->crp_nbits = bits;
+
+    BN_bn2bin(a, b);
+    return (0);
+}
+
+/* Convert a /dev/crypto parameter to a BIGNUM */
+static int crparam2bn(struct crparam *crp, BIGNUM *a)
+{
+    u_int8_t *pd;
+    int i, bytes;
+
+    bytes = (crp->crp_nbits + 7) / 8;
+
+    if (bytes == 0)
+        return (-1);
+
+    if ((pd = OPENSSL_malloc(bytes)) == NULL)
+        return (-1);
+
+    for (i = 0; i < bytes; i++)
+        pd[i] = crp->crp_p[bytes - i - 1];
+
+    BN_bin2bn(pd, bytes, a);
+    free(pd);
+
+    return (0);
+}
+
+static void zapparams(struct crypt_kop *kop)
+{
+    int i;
+
+    for (i = 0; i < kop->crk_iparams + kop->crk_oparams; i++) {
+        OPENSSL_free(kop->crk_param[i].crp_p);
+        kop->crk_param[i].crp_p = NULL;
+        kop->crk_param[i].crp_nbits = 0;
+    }
+}
+
+static int
+cryptodev_asym(struct crypt_kop *kop, int rlen, BIGNUM *r, int slen,
+               BIGNUM *s)
+{
+    int ret = -1;
+
+    if (r) {
+        kop->crk_param[kop->crk_iparams].crp_p = OPENSSL_zalloc(rlen);
+        if (kop->crk_param[kop->crk_iparams].crp_p == NULL)
+            return ret;
+        kop->crk_param[kop->crk_iparams].crp_nbits = rlen * 8;
+        kop->crk_oparams++;
+    }
+    if (s) {
+        kop->crk_param[kop->crk_iparams + 1].crp_p =
+            OPENSSL_zalloc(slen);
+        /* No need to free the kop->crk_iparams parameter if it was allocated,
+         * callers of this routine have to free allocated parameters through
+         * zapparams both in case of success and failure
+         */
+        if (kop->crk_param[kop->crk_iparams+1].crp_p == NULL)
+            return ret;
+        kop->crk_param[kop->crk_iparams + 1].crp_nbits = slen * 8;
+        kop->crk_oparams++;
+    }
+
+    if (ioctl(cfd, CIOCKEY, kop) == 0) {
+        if (r)
+            crparam2bn(&kop->crk_param[kop->crk_iparams], r);
+        if (s)
+            crparam2bn(&kop->crk_param[kop->crk_iparams + 1], s);
+        ret = 0;
+    }
+
+    return ret;
+}
+
+static int
+cryptodev_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
+                     const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *in_mont)
+{
+    struct crypt_kop kop;
+    int ret = 1;
+
+    /*
+     * Currently, we know we can do mod exp iff we can do any asymmetric
+     * operations at all.
+     */
+    if (cryptodev_asymfeat == 0) {
+        ret = BN_mod_exp(r, a, p, m, ctx);
+        return (ret);
+    }
+
+    memset(&kop, 0, sizeof(kop));
+    kop.crk_op = CRK_MOD_EXP;
+
+    /* inputs: a^p % m */
+    if (bn2crparam(a, &kop.crk_param[0]))
+        goto err;
+    if (bn2crparam(p, &kop.crk_param[1]))
+        goto err;
+    if (bn2crparam(m, &kop.crk_param[2]))
+        goto err;
+    kop.crk_iparams = 3;
+
+    if (cryptodev_asym(&kop, BN_num_bytes(m), r, 0, NULL)) {
+        const RSA_METHOD *meth = RSA_PKCS1_OpenSSL();
+        // asym process failed, Running in software
+        ret = RSA_meth_get_bn_mod_exp(meth)(r, a, p, m, ctx, in_mont);
+
+    }
+    /* else cryptodev operation worked ok ==> ret = 1 */
+
+ err:
+    zapparams(&kop);
+    return (ret);
+}
+
+static void prepare_asym_cipher_methods(void)
+{
+    if ((devcrypto_rsa = RSA_meth_dup(RSA_PKCS1_OpenSSL())) == NULL
+        || !RSA_meth_set1_name(devcrypto_rsa, "cryptodev RSA method")
+        || !RSA_meth_set_flags(devcrypto_rsa, 0)
+        ) {
+        RSA_meth_free(devcrypto_rsa);
+        devcrypto_rsa = NULL;
+        return;
+    } else {
+        if (cryptodev_asymfeat & CRF_MOD_EXP) {
+            RSA_meth_set_bn_mod_exp(devcrypto_rsa, cryptodev_bn_mod_exp);
+        }
+    }
+}
+
+static void destroy_all_asym_cipher_methods(void)
+{
+    RSA_meth_free(devcrypto_rsa);
+    devcrypto_rsa = NULL;
+}
+
+/******************************************************************************
+ *
  * LOAD / UNLOAD
  *
  *****/
@@ -746,6 +923,7 @@ static int devcrypto_unload(ENGINE *e)
 #ifdef IMPLEMENT_DIGEST
     destroy_all_digest_methods();
 #endif
+    destroy_all_asym_cipher_methods();
 
     close(cfd);
 
@@ -779,48 +957,23 @@ void engine_load_devcrypto_int()
         return;
     }
 
+    /*
+     * find out what asymmetric crypto algorithms we support
+     */
+    if (ioctl(cfd, CIOCASYMFEAT, &cryptodev_asymfeat) == -1) {
+        ENGINE_free(e);
+        return;
+    }
+
     prepare_cipher_methods();
 #ifdef IMPLEMENT_DIGEST
     prepare_digest_methods();
 #endif
+    prepare_asym_cipher_methods();
 
     if (!ENGINE_set_id(e, "devcrypto")
         || !ENGINE_set_name(e, "/dev/crypto engine")
-
-/*
- * Asymmetric ciphers aren't well supported with /dev/crypto.  Among the BSD
- * implementations, it seems to only exist in FreeBSD, and regarding the
- * parameters in its crypt_kop, the manual crypto(4) has this to say:
- *
- *    The semantics of these arguments are currently undocumented.
- *
- * Reading through the FreeBSD source code doesn't give much more than
- * their CRK_MOD_EXP implementation for ubsec.
- *
- * It doesn't look much better with cryptodev-linux.  They have the crypt_kop
- * structure as well as the command (CRK_*) in cryptodev.h, but no support
- * seems to be implemented at all for the moment.
- *
- * At the time of writing, it seems impossible to write proper support for
- * FreeBSD's asym features without some very deep knowledge and access to
- * specific kernel modules.
- *
- * /Richard Levitte, 2017-05-11
- */
-#if 0
-# ifndef OPENSSL_NO_RSA
         || !ENGINE_set_RSA(e, devcrypto_rsa)
-# endif
-# ifndef OPENSSL_NO_DSA
-        || !ENGINE_set_DSA(e, devcrypto_dsa)
-# endif
-# ifndef OPENSSL_NO_DH
-        || !ENGINE_set_DH(e, devcrypto_dh)
-# endif
-# ifndef OPENSSL_NO_EC
-        || !ENGINE_set_EC(e, devcrypto_ec)
-# endif
-#endif
         || !ENGINE_set_ciphers(e, devcrypto_ciphers)
 #ifdef IMPLEMENT_DIGEST
         || !ENGINE_set_digests(e, devcrypto_digests)
