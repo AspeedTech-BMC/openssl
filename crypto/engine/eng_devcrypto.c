@@ -20,6 +20,7 @@
 #include <openssl/err.h>
 #include <openssl/engine.h>
 #include <openssl/objects.h>
+#include <openssl/ecdsa.h>
 #include <crypto/cryptodev.h>
 
 #include "crypto/engine.h"
@@ -743,6 +744,29 @@ static int devcrypto_digests(ENGINE *e, const EVP_MD **digest,
 static u_int32_t cryptodev_asymfeat = 0;
 
 static RSA_METHOD *devcrypto_rsa;
+static EC_KEY_METHOD *devcrypto_ec;
+
+int (*sign)(int type, const unsigned char *dgst,
+            int dlen, unsigned char *sig,
+            unsigned int *siglen,
+            const BIGNUM *kinv, const BIGNUM *r,
+            EC_KEY *eckey);
+int (*sign_setup)(EC_KEY *eckey, BN_CTX *ctx_in, 
+                  BIGNUM **kinvp, BIGNUM **rp);
+ECDSA_SIG *(*sign_sig)(const unsigned char *dgst,
+                       int dgst_len,
+                       const BIGNUM *in_kinv,
+                       const BIGNUM *in_r,
+                       EC_KEY *eckey);
+
+int (*verify)(int type, const unsigned
+              char *dgst, int dgst_len,
+              const unsigned char *sigbuf,
+              int sig_len, EC_KEY *eckey);
+int (*verify_sig)(const unsigned char *dgst,
+                  int dgst_len,
+                  const ECDSA_SIG *sig,
+                  EC_KEY *eckey);
 
 static int bn2crparam(const BIGNUM *a, struct crparam *crp);
 static int crparam2bn(struct crparam *crp, BIGNUM *a);
@@ -811,6 +835,26 @@ static void zapparams(struct crypt_kop *kop)
     }
 }
 
+static int bin2crparam(const unsigned char *a, int a_len, struct crparam *crp)
+{
+    // ssize_t bytes, bits;
+    unsigned char *b;
+
+    crp->crp_p = NULL;
+    crp->crp_nbits = 0;
+
+    b = OPENSSL_zalloc(a_len);
+    if (b == NULL)
+        return (1);
+
+    memcpy(b, a, a_len);
+
+    crp->crp_p = (__u8 *) b;
+    crp->crp_nbits = a_len * 8;
+
+    return (0);
+}
+
 static int
 cryptodev_asym(struct crypt_kop *kop, int rlen, BIGNUM *r, int slen,
                BIGNUM *s)
@@ -837,12 +881,13 @@ cryptodev_asym(struct crypt_kop *kop, int rlen, BIGNUM *r, int slen,
         kop->crk_oparams++;
     }
 
-    if (ioctl(cfd, CIOCKEY, kop) == 0) {
+    ret = ioctl(cfd, CIOCKEY, kop);
+
+    if (ret == 0) {
         if (r)
             crparam2bn(&kop->crk_param[kop->crk_iparams], r);
         if (s)
             crparam2bn(&kop->crk_param[kop->crk_iparams + 1], s);
-        ret = 0;
     }
 
     return ret;
@@ -889,6 +934,163 @@ cryptodev_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     return (ret);
 }
 
+static char cryptodev_ecdsa_supported_curve(int curve_NID, char *curv_id)
+{
+    switch(curve_NID) {
+    case NID_X9_62_prime192v1:
+        *curv_id = CRYPTO_ECC_CURVE_NIST_P192;
+        return 24;
+    case NID_secp224r1:
+        *curv_id = CRYPTO_ECC_CURVE_NIST_P224;
+        return 28;
+    case NID_X9_62_prime256v1:
+        *curv_id = CRYPTO_ECC_CURVE_NIST_P256;
+        return 32;
+    case NID_secp384r1:
+        *curv_id = CRYPTO_ECC_CURVE_NIST_P384;
+        return 48;
+    default:
+        return 0;
+    }
+}
+
+static ECDSA_SIG *
+cryptodev_ecdsa_sign_sig(const unsigned char *dgst, int dgst_len, 
+                         const BIGNUM *in_kinv, const BIGNUM *in_r, 
+                         EC_KEY *eckey)
+{
+    struct crypt_kop kop;
+    ECDSA_SIG *ret;
+    BIGNUM *r, *s;
+    const EC_GROUP *group;
+    const BIGNUM *priv_key;
+    char curv_id;
+    int n_len;
+
+    group = EC_KEY_get0_group(eckey);
+    priv_key = EC_KEY_get0_private_key(eckey);
+    if (group == NULL || priv_key == NULL) {
+        return NULL;
+    }
+
+    ret = ECDSA_SIG_new();
+    if (ret == NULL) {
+        return NULL;
+    }
+
+    r = BN_new();
+    s = BN_new();
+    if (r == NULL || s == NULL) {
+        goto err;
+    }
+
+    n_len = cryptodev_ecdsa_supported_curve(EC_GROUP_get_curve_name(group), &curv_id);
+
+    if (!n_len){
+        fprintf(stderr, "curve id not supported by devcrypto\n");
+        goto err;
+    }
+
+    memset(&kop, 0, sizeof(kop));
+    kop.crk_op = CRK_ECDSA_SIGN;
+
+    if (bin2crparam((const unsigned char*) &curv_id, 1, &kop.crk_param[0]))
+        goto err;
+    if (bin2crparam(dgst, dgst_len, &kop.crk_param[1]))
+        goto err;
+    if (bn2crparam(priv_key, &kop.crk_param[2]))
+        goto err;
+    kop.crk_iparams = 3;
+
+    if (cryptodev_asym(&kop, n_len, r, n_len, s)) {
+        goto err;
+    }
+
+    ECDSA_SIG_set0(ret, r, s);
+
+    return ret;
+err:
+    BN_clear_free(r);
+    BN_clear_free(s);
+
+    printf("HW err, using SW");
+
+    return sign_sig(dgst, dgst_len, in_kinv, in_r, eckey);
+}
+
+int cryptodev_ecdsa_verify_sig(const unsigned char *dgst, int dgst_len,
+                               const ECDSA_SIG *sig, EC_KEY *eckey)
+{
+    struct crypt_kop kop;
+    BN_CTX *ctx = NULL;
+    BIGNUM *x, *y;
+    const BIGNUM *r = NULL;
+    const BIGNUM *s = NULL;
+    const EC_GROUP *group;
+    const EC_POINT *public_key;
+    char curv_id;
+    int ret;
+    // size_t ec_key_len;
+
+
+    group = EC_KEY_get0_group(eckey);
+    public_key = EC_KEY_get0_public_key(eckey);
+    if (group == NULL || public_key == NULL) {
+        return -1;
+    }
+    // ec_key_len = (EC_GROUP_order_bits(group) + 7) / 8;
+
+    if ((ctx = BN_CTX_new()) == NULL) {
+        return -1;
+    }
+
+    x = BN_new();
+    y = BN_new();
+    if (x == NULL || y == NULL) {
+        goto err;
+    }
+
+    ECDSA_SIG_get0(sig, &r, &s);
+
+    if (!cryptodev_ecdsa_supported_curve(EC_GROUP_get_curve_name(group), &curv_id)) {
+        fprintf(stderr, "curve id not supported by devcrypto\n");
+        goto err;
+    }
+
+    if (!EC_POINT_get_affine_coordinates(group, public_key, x, y, ctx)) {
+        return -1;
+    }
+
+    memset(&kop, 0, sizeof(kop));
+    kop.crk_op = CRK_ECDSA_VERIFY;
+
+    if (bin2crparam((const unsigned char *)&curv_id, 1, &kop.crk_param[0]))
+        goto err;
+    if (bin2crparam(dgst, dgst_len, &kop.crk_param[1]))
+        goto err;
+    if (bn2crparam(r, &kop.crk_param[2]))
+        goto err;
+    if (bn2crparam(s, &kop.crk_param[3]))
+        goto err;
+    if (bn2crparam(x, &kop.crk_param[4]))
+        goto err;
+    if (bn2crparam(y, &kop.crk_param[5]))
+        goto err;
+    kop.crk_iparams = 6;
+
+
+    ret = cryptodev_asym(&kop, 0, NULL, 0, NULL);
+    if (ret == -EBADMSG) {
+        return 0;
+    } else if (ret == 0) {
+        return 1;
+    }
+
+err:
+    printf("HW err, using SW");
+    return verify_sig(dgst, dgst_len, sig, eckey);
+}
+
 static void prepare_asym_cipher_methods(void)
 {
     if ((devcrypto_rsa = RSA_meth_dup(RSA_PKCS1_OpenSSL())) == NULL
@@ -903,6 +1105,24 @@ static void prepare_asym_cipher_methods(void)
             RSA_meth_set_bn_mod_exp(devcrypto_rsa, cryptodev_bn_mod_exp);
         }
     }
+
+    if ((devcrypto_ec = EC_KEY_METHOD_new(EC_KEY_OpenSSL())) == NULL)
+    {
+        EC_KEY_METHOD_free(devcrypto_ec);
+        devcrypto_ec = NULL;
+        return;
+    } else {
+        if (cryptodev_asymfeat & CRF_ECDSA_SIGN) {
+            EC_KEY_METHOD_get_sign(devcrypto_ec, &sign, &sign_setup, &sign_sig);
+            EC_KEY_METHOD_set_sign(devcrypto_ec, sign, sign_setup, cryptodev_ecdsa_sign_sig);
+        }
+        if (cryptodev_asymfeat & CRF_ECDSA_VERIFY) {
+            EC_KEY_METHOD_get_verify(devcrypto_ec, &verify, &verify_sig);
+            EC_KEY_METHOD_set_verify(devcrypto_ec, verify, cryptodev_ecdsa_verify_sig);
+        }
+
+    }
+
 }
 
 static void destroy_all_asym_cipher_methods(void)
@@ -974,6 +1194,7 @@ void engine_load_devcrypto_int()
     if (!ENGINE_set_id(e, "devcrypto")
         || !ENGINE_set_name(e, "/dev/crypto engine")
         || !ENGINE_set_RSA(e, devcrypto_rsa)
+        || !ENGINE_set_EC(e, devcrypto_ec)
         || !ENGINE_set_ciphers(e, devcrypto_ciphers)
 #ifdef IMPLEMENT_DIGEST
         || !ENGINE_set_digests(e, devcrypto_digests)
