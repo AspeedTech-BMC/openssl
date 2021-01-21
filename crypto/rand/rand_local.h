@@ -133,6 +133,26 @@ typedef struct rand_drbg_method_st {
     RAND_DRBG_uninstantiate_fn uninstantiate;
 } RAND_DRBG_METHOD;
 
+/* 888 bits from SP800-90Ar1 10.1 table 2 */
+#define HASH_PRNG_MAX_SEEDLEN    (888/8)
+
+typedef struct rand_drbg_hash_st {
+    const EVP_MD *md;
+    EVP_MD_CTX *ctx;
+    size_t blocklen;
+    unsigned char V[HASH_PRNG_MAX_SEEDLEN];
+    unsigned char C[HASH_PRNG_MAX_SEEDLEN];
+    /* Temporary value storage: should always exceed max digest length */
+    unsigned char vtmp[HASH_PRNG_MAX_SEEDLEN];
+} RAND_DRBG_HASH;
+
+typedef struct rand_drbg_hmac_st {
+    const EVP_MD *md;
+    HMAC_CTX *ctx;
+    size_t blocklen;
+    unsigned char K[EVP_MAX_MD_SIZE];
+    unsigned char V[EVP_MAX_MD_SIZE];
+} RAND_DRBG_HMAC;
 
 /*
  * The state of a DRBG AES-CTR.
@@ -265,9 +285,11 @@ struct rand_drbg_st {
     /* Application data, mainly used in the KATs. */
     CRYPTO_EX_DATA ex_data;
 
-    /* Implementation specific data (currently only one implementation) */
+    /* Implementation specific data */
     union {
         RAND_DRBG_CTR ctr;
+        RAND_DRBG_HASH hash;
+        RAND_DRBG_HMAC hmac;
     } data;
 
     /* Implementation specific methods */
@@ -293,7 +315,9 @@ int rand_drbg_unlock(RAND_DRBG *drbg);
 int rand_drbg_enable_locking(RAND_DRBG *drbg);
 
 
-/* initializes the AES-CTR DRBG implementation */
+/* initializes the DRBG implementation */
 int drbg_ctr_init(RAND_DRBG *drbg);
+int drbg_hash_init(RAND_DRBG *drbg);
+int drbg_hmac_init(RAND_DRBG *drbg);
 
 #endif

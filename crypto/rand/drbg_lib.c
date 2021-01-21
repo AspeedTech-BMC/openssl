@@ -84,7 +84,7 @@ static time_t slave_reseed_time_interval  = SLAVE_RESEED_TIME_INTERVAL;
 
 /* A logical OR of all used DRBG flag bits (currently there is only one) */
 static const unsigned int rand_drbg_used_flags =
-    RAND_DRBG_FLAG_CTR_NO_DF;
+    RAND_DRBG_FLAG_CTR_NO_DF | RAND_DRBG_FLAG_HMAC;
 
 static RAND_DRBG *drbg_setup(RAND_DRBG *parent);
 
@@ -92,6 +92,38 @@ static RAND_DRBG *rand_drbg_new(int secure,
                                 int type,
                                 unsigned int flags,
                                 RAND_DRBG *parent);
+
+static int is_ctr(int type)
+{
+    switch (type) {
+    case NID_aes_128_ctr:
+    case NID_aes_192_ctr:
+    case NID_aes_256_ctr:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int is_digest(int type)
+{
+    switch (type) {
+    case NID_sha1:
+    case NID_sha224:
+    case NID_sha256:
+    case NID_sha384:
+    case NID_sha512:
+    case NID_sha512_224:
+    case NID_sha512_256:
+    case NID_sha3_224:
+    case NID_sha3_256:
+    case NID_sha3_384:
+    case NID_sha3_512:
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 /*
  * Set/initialize |drbg| to be of type |type|, with optional |flags|.
@@ -120,22 +152,23 @@ int RAND_DRBG_set(RAND_DRBG *drbg, int type, unsigned int flags)
     drbg->flags = flags;
     drbg->type = type;
 
-    switch (type) {
-    default:
+    if (type == 0) {
+        /* Uninitialized; that's okay. */
+        drbg->meth = NULL;
+        return 1;
+    } else if (is_ctr(type)) {
+        ret = drbg_ctr_init(drbg);
+    } else if (is_digest(type)) {
+        if (flags & RAND_DRBG_FLAG_HMAC)
+            ret = drbg_hmac_init(drbg);
+        else
+            ret = drbg_hash_init(drbg);
+    } else {
         drbg->type = 0;
         drbg->flags = 0;
         drbg->meth = NULL;
         RANDerr(RAND_F_RAND_DRBG_SET, RAND_R_UNSUPPORTED_DRBG_TYPE);
         return 0;
-    case 0:
-        /* Uninitialized; that's okay. */
-        drbg->meth = NULL;
-        return 1;
-    case NID_aes_128_ctr:
-    case NID_aes_192_ctr:
-    case NID_aes_256_ctr:
-        ret = drbg_ctr_init(drbg);
-        break;
     }
 
     if (ret == 0) {
@@ -154,14 +187,9 @@ int RAND_DRBG_set_defaults(int type, unsigned int flags)
 {
     int ret = 1;
 
-    switch (type) {
-    default:
+    if (!(is_digest(type) || is_ctr(type))) {
         RANDerr(RAND_F_RAND_DRBG_SET_DEFAULTS, RAND_R_UNSUPPORTED_DRBG_TYPE);
         return 0;
-    case NID_aes_128_ctr:
-    case NID_aes_192_ctr:
-    case NID_aes_256_ctr:
-        break;
     }
 
     if ((flags & ~rand_drbg_used_flags) != 0) {

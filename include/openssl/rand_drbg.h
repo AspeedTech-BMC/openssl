@@ -23,6 +23,11 @@
 
 /* In CTR mode, disable derivation function ctr_df */
 # define RAND_DRBG_FLAG_CTR_NO_DF            0x1
+/*
+ * This flag is only used when a digest NID is specified (i.e: not a CTR cipher)
+ * Selects DRBG_HMAC if this is set otherwise use DRBG_HASH.
+ */
+# define RAND_DRBG_FLAG_HMAC                 0x2
 
 
 # if OPENSSL_API_COMPAT < 0x10200000L
