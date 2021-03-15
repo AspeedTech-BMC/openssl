@@ -78,6 +78,9 @@ static const struct cipher_data_st {
 #ifndef OPENSSL_NO_DES
     { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, CRYPTO_DES_CBC },
     { NID_des_ede3_cbc, 8, 24, 8, EVP_CIPH_CBC_MODE, CRYPTO_3DES_CBC },
+    { NID_des_ede3_ecb, 8, 24, 8, EVP_CIPH_ECB_MODE, CRYPTO_3DES_ECB },
+    { NID_des_ede3_cfb64, 8, 24, 8, EVP_CIPH_CFB_MODE, CRYPTO_3DES_CFB64 },
+    { NID_des_ede3_ofb64, 8, 24, 8, EVP_CIPH_OFB_MODE, CRYPTO_3DES_OFB },
 #endif
 #ifndef OPENSSL_NO_BF
     { NID_bf_cbc, 8, 16, 8, EVP_CIPH_CBC_MODE, CRYPTO_BLF_CBC },
@@ -105,6 +108,13 @@ static const struct cipher_data_st {
     { NID_aes_192_ecb, 16, 192 / 8, 0, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
     { NID_aes_256_ecb, 16, 256 / 8, 0, EVP_CIPH_ECB_MODE, CRYPTO_AES_ECB },
 #endif
+    { NID_aes_128_ofb128, 16, 128 / 8, 16, EVP_CIPH_OFB_MODE, CRYPTO_AES_OFB },
+    { NID_aes_192_ofb128, 16, 192 / 8, 16, EVP_CIPH_OFB_MODE, CRYPTO_AES_OFB },
+    { NID_aes_256_ofb128, 16, 256 / 8, 16, EVP_CIPH_OFB_MODE, CRYPTO_AES_OFB },
+
+    { NID_aes_128_cfb128, 16, 128 / 8, 16, EVP_CIPH_CFB_MODE, CRYPTO_AES_CFB128 },
+    { NID_aes_192_cfb128, 16, 192 / 8, 16, EVP_CIPH_CFB_MODE, CRYPTO_AES_CFB128 },
+    { NID_aes_256_cfb128, 16, 256 / 8, 16, EVP_CIPH_CFB_MODE, CRYPTO_AES_CFB128 },
 #if 0                            /* Not yet supported */
     { NID_aes_128_gcm, 16, 128 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
     { NID_aes_192_gcm, 16, 192 / 8, 16, EVP_CIPH_GCM_MODE, CRYPTO_AES_GCM },
@@ -490,6 +500,12 @@ static const struct digest_data_st {
 #endif
 #if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_512)
     { NID_sha512, SHA512_CBLOCK, 512 / 8, CRYPTO_SHA2_512 },
+#endif
+#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_512)
+    { NID_sha512_224, SHA512_CBLOCK, 224 / 8, CRYPTO_SHA2_512_224 },
+#endif
+#if !defined(CHECK_BSD_STYLE_MACROS) || defined(CRYPTO_SHA2_512)
+    { NID_sha512_256, SHA512_CBLOCK, 256 / 8, CRYPTO_SHA2_512_256 },
 #endif
 };
 
