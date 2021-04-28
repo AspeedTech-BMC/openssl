@@ -405,6 +405,9 @@ int engine_main(int argc, char **argv)
                 if (ENGINE_get_RAND(e) != NULL
                     && !append_buf(&cap_buf, &cap_size, "RAND"))
                     goto end;
+                if (ENGINE_get_EC(e) != NULL
+                    && !append_buf(&cap_buf, &cap_size, "EC"))
+                    goto end;
 
                 fn_c = ENGINE_get_ciphers(e);
                 if (fn_c == NULL)

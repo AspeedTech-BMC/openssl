@@ -103,6 +103,9 @@ int RSA_X931_hash_id(int nid)
     case NID_sha1:
         return 0x33;
 
+    case NID_sha224:
+        return 0x38;
+
     case NID_sha256:
         return 0x34;
 
@@ -112,6 +115,11 @@ int RSA_X931_hash_id(int nid)
     case NID_sha512:
         return 0x35;
 
+    case NID_sha512_224:
+        return 0x39;
+
+    case NID_sha512_256:
+        return 0x3a;
     }
     return -1;
 }
