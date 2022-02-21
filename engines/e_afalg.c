@@ -1173,6 +1173,10 @@ static void dump_cipher_info(void)
     fprintf(stderr, "\n");
 }
 
+#ifndef AFALG_DIGESTS
+#define AFALG_DIGESTS
+#endif
+
 #ifdef AFALG_DIGESTS
 /******************************************************************************
  *

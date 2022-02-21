@@ -10,6 +10,7 @@
 # This definition stops the following lines choking if HOME isn't
 # defined.
 HOME			= .
+# openssl_conf = openssl_conf
 
 # Extra OBJECT IDENTIFIER info:
 #oid_file		= $ENV::HOME/.oid
@@ -348,3 +349,13 @@ ess_cert_id_chain	= no	# Must the ESS cert id chain be included?
 				# (optional, default: no)
 ess_cert_id_alg		= sha1	# algorithm to compute certificate
 				# identifier (optional, default: sha1)
+[openssl_conf]
+engines = engines
+
+[engines]
+afalg = afalg
+
+[afalg]
+default_algorithms = ALL
+CIPHERS = ALL
+DIGESTS = ALL
