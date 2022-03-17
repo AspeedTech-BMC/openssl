@@ -48,7 +48,7 @@ static size_t zc_maxsize, pagemask;
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 
-#include <openssl/conf.h>
+#include <openssl/rsa.h>
 #include <openssl/engine.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -64,6 +64,7 @@ static size_t zc_maxsize, pagemask;
 # define CRYPTO_ALG_TYPE_AHASH           0x0000000f
 # define CRYPTO_ALG_KERN_DRIVER_ONLY     0x00001000
 # define CRYPTO_ALG_INTERNAL             0x00002000
+# define CRYPTO_ALG_TYPE_AKCIPHER        0x0000000d
 #endif
 
 #ifndef OSSL_NELEM
@@ -253,7 +254,8 @@ static int prepare_afalg_alg_list(void)
             continue;
         alg_type = cru_res->cru_flags & CRYPTO_ALG_TYPE_MASK;
         if ((alg_type != CRYPTO_ALG_TYPE_SKCIPHER && alg_type != CRYPTO_ALG_TYPE_BLKCIPHER
-             && alg_type != CRYPTO_ALG_TYPE_SHASH && alg_type != CRYPTO_ALG_TYPE_AHASH)
+             && alg_type != CRYPTO_ALG_TYPE_SHASH && alg_type != CRYPTO_ALG_TYPE_AHASH
+	     && alg_type != CRYPTO_ALG_TYPE_AKCIPHER)
             || cru_res->cru_flags & CRYPTO_ALG_INTERNAL)
             continue;
         list = OPENSSL_realloc(afalg_alg_list, (list_count + 1) * sizeof(struct afalg_alg_info));
@@ -462,11 +464,11 @@ static size_t get_cipher_data_index(int nid)
     return -1;
 }
 
-static int afalg_set_key(int sfd, const void *key, int keylen)
+static int afalg_set_key(int sfd, const void *key, int keylen, int sockopt)
 {
-    if (setsockopt(sfd, SOL_ALG, ALG_SET_KEY, key, keylen) >= 0)
+    if (setsockopt(sfd, SOL_ALG, sockopt, key, keylen) >= 0)
         return 1;
-    SYSerr(SYS_F_SETSOCKOPT, errno);
+
     return 0;
 }
 
@@ -488,6 +490,7 @@ static int afalg_set_control(struct msghdr *msg, int op,
         perror("afalg_set_control: OPENSSL_zalloc");
         return 0;
     }
+
     cmsg = CMSG_FIRSTHDR(msg);
     if (cmsg == NULL) {
         fprintf(stderr, "%s: CMSG_FIRSTHDR error setting op.\n", __func__);
@@ -595,7 +598,7 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     }
     if (key != NULL) {
         if ((keylen = EVP_CIPHER_CTX_key_length(ctx)) > 0
-            && !afalg_set_key(cipher_ctx->bfd, key, keylen)) {
+            && !afalg_set_key(cipher_ctx->bfd, key, keylen, ALG_SET_KEY)) {
             fprintf(stderr, "cipher_init: Error setting key.\n");
             goto err;
         }
@@ -1372,6 +1375,7 @@ static int afalg_do_digest(EVP_MD_CTX *ctx, const void *data, size_t len,
     struct iovec iov;
     int use_zc = (len <= zc_maxsize) && (((size_t)data & pagemask) == 0);
 #endif
+
 #ifndef AFALG_NO_FALLBACK
     if (digest_ctx->sfd == -1 && digest_ctx->fallback && !more
         && len < digest_ctx->fb_threshold
@@ -1765,6 +1769,383 @@ static void dump_digest_info(void)
 
 /******************************************************************************
  *
+ * Asymmetric
+ *
+ *****/
+struct rsa_ctx {
+    int bfd;
+    int sfd;
+    int is_connect;
+    u_char *e;
+    u_char *n;
+    int e_sz;
+    int n_sz;
+    u_char *ber_key;
+    int ber_key_len;
+};
+
+static RSA_METHOD *afalg_rsa_methods;
+struct rsa_ctx *rsa_ctx = NULL;
+
+#define ALG_SET_PUBKEY          7
+#define _tag(CLASS, CP, TAG)    \
+        ((V_ASN1_##CLASS << 6) | ((V_ASN1_##CP & 0x20) << 5) | V_ASN1_##TAG)
+
+static int ber_wr_tag(uint8_t **ber_ptr, uint8_t tag)
+{
+	**ber_ptr = tag;
+	*ber_ptr += 1;
+
+	return 0;
+}
+
+static int ber_wr_len(uint8_t **ber_ptr, size_t len, size_t sz)
+{
+	if (len < 127) {
+		**ber_ptr = len;
+		*ber_ptr += 1;
+	} else {
+		size_t sz_save = sz;
+
+		sz--;
+		**ber_ptr = 0x80 | sz;
+
+		while (sz > 0) {
+			*(*ber_ptr + sz) = len & 0xff;
+			len >>= 8;
+			sz--;
+		}
+		*ber_ptr += sz_save;
+	}
+
+	return 0;
+}
+
+static int ber_wr_int(uint8_t **ber_ptr, uint8_t *src, size_t sz)
+{
+	int ret;
+
+	memcpy(*ber_ptr, src, sz);
+	*ber_ptr += sz;
+
+	return 0;
+}
+
+/* calculate the size of the length field itself in BER encoding */
+size_t ber_enc_len(size_t len)
+{
+	size_t sz;
+
+	sz = 1;
+	if (len > 127) {		/* long encoding */
+		while (len != 0) {
+			len >>= 8;
+			sz++;
+		}
+	}
+
+	return sz;
+}
+static int asn1_ber_encoding(void)
+{
+	int e_sz, n_sz, s_sz;
+	int e_enc_len;
+	int n_enc_len;
+	int s_enc_len;
+	int err;
+	u_char *ber_ptr;
+
+	e_sz = rsa_ctx->e_sz;
+	n_sz = rsa_ctx->n_sz;
+
+    e_enc_len = ber_enc_len(e_sz);
+    n_enc_len = ber_enc_len(n_sz);
+
+    /*
+     * Sequence length is the size of all the fields following the sequence
+     * tag, added together. The two added bytes account for the two INT
+     * tags in the Public Key sequence
+     */
+    s_sz = e_sz + e_enc_len + n_sz + n_enc_len + 2;
+    s_enc_len = ber_enc_len(s_sz);
+
+    /* The added byte accounts for the SEQ tag at the start of the key */
+    rsa_ctx->ber_key_len = s_sz + s_enc_len + 1;
+
+    rsa_ctx->ber_key = OPENSSL_zalloc(rsa_ctx->ber_key_len);
+    if (!rsa_ctx->ber_key) {
+            printf("%s: ber key allocation failed\n", __func__);
+            return -EINVAL;
+    }
+
+    memset(rsa_ctx->ber_key, 0, sizeof(rsa_ctx->ber_key));
+    ber_ptr = rsa_ctx->ber_key;
+
+    err = ber_wr_tag(&ber_ptr, _tag(UNIVERSAL, CONSTRUCTED, SEQUENCE))  ||
+          ber_wr_len(&ber_ptr, s_sz, s_enc_len)                         ||
+          ber_wr_tag(&ber_ptr, _tag(UNIVERSAL, PRIMITIVE_TAG, INTEGER)) ||
+          ber_wr_len(&ber_ptr, n_sz, n_enc_len)                         ||
+          ber_wr_int(&ber_ptr, rsa_ctx->n, n_sz)                        ||
+          ber_wr_tag(&ber_ptr, _tag(UNIVERSAL, PRIMITIVE_TAG, INTEGER)) ||
+          ber_wr_len(&ber_ptr, e_sz, e_enc_len)                         ||
+          ber_wr_int(&ber_ptr, rsa_ctx->e, e_sz);
+    if (err) {
+        printf("%s: gen ber key failed\n", __func__);
+        goto free_key;
+    }
+
+	return 0;
+
+free_key:
+    if (rsa_ctx->ber_key)
+        OPENSSL_free(rsa_ctx->ber_key);
+	return -EINVAL;
+}
+
+static int afalg_set_pubkey(const BIGNUM *e, const BIGNUM *n)
+{
+    u_char *key = NULL;
+    int len, len_e, len_n;
+    int ret;
+    int i;
+
+    /* transfer BN to binary & remove leading zero */
+    len = len_e = BN_num_bytes(e);
+    key = OPENSSL_zalloc(len);
+    if (!len || !key) {
+        printf("%s: key allocation failed\n", __func__);
+        goto err;
+    }
+
+    BN_bn2bin(e, key);
+    while (len > 0 && (key[0] == 0)) {
+        len--;
+        key++;
+    }
+
+    rsa_ctx->e = OPENSSL_zalloc(len);
+    memcpy(rsa_ctx->e, key, len);
+    rsa_ctx->e_sz = len;
+    OPENSSL_free(key);
+
+    len = len_n = BN_num_bytes(n);
+    key = OPENSSL_zalloc(len);
+    if (!len || !key)
+        goto err;
+
+    BN_bn2bin(n, key);
+    while (len > 0 && (key[0] == 0)) {
+        len--;
+        key++;
+    }
+
+    rsa_ctx->n = OPENSSL_zalloc(len);
+    memcpy(rsa_ctx->n, key, len);
+    rsa_ctx->n_sz = len;
+    OPENSSL_free(key);
+
+    /* Convert key to BER format */
+    ret = asn1_ber_encoding();
+    if (ret) {
+        printf("%s: asn1 ber encoding failed\n", __func__);
+        goto err;
+    }
+
+    /* Set public key */
+    ret = afalg_set_key(rsa_ctx->bfd, rsa_ctx->ber_key, rsa_ctx->ber_key_len,
+		ALG_SET_PUBKEY);
+    if (!ret)
+	goto err;
+
+    return 0;
+
+err:
+    return -1;
+}
+
+static int afalg_asym_cipher_init(BIGNUM *e, BIGNUM *n)
+{
+    int ret;
+
+    /* Start connecting akcipher */
+    if (!rsa_ctx) {
+        rsa_ctx = OPENSSL_malloc(sizeof(struct rsa_ctx));
+        if (!rsa_ctx) {
+            printf("%s: rsa_ctx allocation failed\n", __func__);
+            return -ENOMEM;
+        }
+    }
+
+    rsa_ctx->is_connect = 0;
+    rsa_ctx->sfd = -1;
+    rsa_ctx->bfd = get_afalg_socket("rsa", "akcipher", 0, 0);
+
+    if (rsa_ctx->bfd < 0) {
+        SYSerr(SYS_F_BIND, errno);
+        printf("%s: bind afalg socket failed\n", __func__);
+        return errno;
+    }
+
+    if ((rsa_ctx->sfd = accept(rsa_ctx->bfd, NULL, 0)) < 0) {
+        ret = rsa_ctx->sfd;
+        printf("%s: accept afalg socket failed\n", __func__);
+        goto accept_fail;
+    }
+
+    /* Set public key */
+    ret = afalg_set_pubkey(e, n);
+    if (ret) {
+        goto fail;
+    }
+
+    rsa_ctx->is_connect = 1;
+
+    return 0;
+
+fail:
+    afalg_closefd(rsa_ctx->sfd);
+
+accept_fail:
+    afalg_closefd(rsa_ctx->bfd);
+    rsa_ctx->sfd = rsa_ctx->bfd = -1;
+
+    if (rsa_ctx) {
+        OPENSSL_free(rsa_ctx);
+        rsa_ctx = NULL;
+    }
+
+    return ret;
+}
+
+static void afalg_asym_cipher_exit(void)
+{
+    if (!rsa_ctx)
+        return;
+
+    if (rsa_ctx->is_connect) {
+        afalg_closefd(rsa_ctx->sfd);
+        afalg_closefd(rsa_ctx->bfd);
+    }
+
+    rsa_ctx->sfd = rsa_ctx->bfd = -1;
+
+    if (rsa_ctx->ber_key)
+        OPENSSL_free(rsa_ctx->ber_key);
+    if (rsa_ctx->n)
+        OPENSSL_free(rsa_ctx->n);
+    if (rsa_ctx->e)
+        OPENSSL_free(rsa_ctx->e);
+    if (rsa_ctx) {
+        OPENSSL_free(rsa_ctx);
+        rsa_ctx = NULL;
+    }
+}
+
+static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
+                            const BIGNUM *m, BN_CTX *ctx, BN_MONT_CTX *in_mont)
+{
+    struct msghdr msg = {0};
+    struct iovec iov = {0};
+    u_char *bin_a, *bin_r;
+    int len_a, len_r;
+    int ret;
+    int op;
+    int i;
+
+    ret = afalg_asym_cipher_init(p, m);
+    if (ret) {
+        /* Hardware failed, use software */
+        const RSA_METHOD *meth = RSA_PKCS1_OpenSSL();
+        ret = RSA_meth_get_bn_mod_exp(meth)(r, a, p, m, ctx, in_mont);
+        goto init_fail;
+    }
+
+    op = ALG_OP_ENCRYPT;
+    ret = afalg_set_control(&msg, op, NULL, 0);
+    if (!ret) {
+        printf("%s: set control failed\n", __func__);
+        goto init_fail;
+    }
+
+    len_a = BN_num_bytes(a);
+    len_r = rsa_ctx->n_sz;
+
+    /* inputs: a^p % m */
+    bin_a = OPENSSL_zalloc(len_a);
+    bin_r = OPENSSL_zalloc(len_r);
+    if (!bin_a || !bin_r) {
+        printf("%s: allocate a/r failed\n", __func__);
+        goto fail;
+    }
+
+    memset(bin_a, 0, sizeof(bin_a));
+    memset(bin_r, 0, sizeof(bin_r));
+    BN_bn2bin(a, bin_a);
+
+    iov.iov_base = (void *)bin_a;
+    iov.iov_len = len_a;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    if ((ret = sendmsg(rsa_ctx->sfd, &msg, 0)) < 0) {
+	    fprintf(stderr, "%s: sendmsg failed, ret:0x%x, errno:0x%x\n",
+			__func__, ret, errno);
+        ret = 0;
+	    goto fail;
+    }
+//    printf("%s: sendmsg, len:0x%x, ret:0x%x\n", __func__, len_a, ret);
+    iov.iov_base = (void *)bin_r;
+    iov.iov_len = len_r;
+
+    if ((ret = read(rsa_ctx->sfd, bin_r, len_r)) < 0) {
+        fprintf(stderr, "%s: recvmsg failed, ret:0x%x, errno:0x%x\n",
+                __func__, ret, errno);
+        ret = 0;
+        goto fail;
+
+    }
+//    printf("%s: recvmsg, len:0x%x, ret:0x%x\n", __func__, len_r, ret);
+
+    BN_bin2bn(bin_r, ret, r);
+    ret = 1;    // successful
+
+fail:
+    if (msg.msg_control)
+        OPENSSL_free(msg.msg_control);
+    if (bin_a)
+        OPENSSL_free(bin_a);
+    if (bin_r)
+        OPENSSL_free(bin_r);
+
+init_fail:
+    afalg_asym_cipher_exit();
+
+    return ret;
+}
+
+static void prepare_asym_cipher_methods(void)
+{
+    struct driver_info_st asym_cipher_driver_info[1];
+    int fd;
+
+    if (afalg_rsa_methods)
+        return;
+
+    if ((afalg_rsa_methods = RSA_meth_dup(RSA_PKCS1_OpenSSL())) == NULL
+        || !RSA_meth_set1_name(afalg_rsa_methods, "afalg RSA method")
+        || !RSA_meth_set_flags(afalg_rsa_methods, 0)
+        || !RSA_meth_set_bn_mod_exp(afalg_rsa_methods, afalg_bn_mod_exp)
+        ) {
+            fprintf(stderr, "%s: allocate RSA methods failed\n", __func__);
+            RSA_meth_free(afalg_rsa_methods);
+            afalg_rsa_methods = NULL;
+            return;
+
+    }
+}
+
+/******************************************************************************
+ *
  * CONTROL COMMANDS
  *
  *****/
@@ -1953,6 +2334,8 @@ static int bind_afalg(ENGINE *e) {
 #ifdef AFALG_DIGESTS
     prepare_digest_methods();
 #endif
+    prepare_asym_cipher_methods();
+
     OPENSSL_free(afalg_alg_list);
     if (afalg_alg_list_count > 0)
         afalg_alg_list_count = 0;
@@ -1960,6 +2343,8 @@ static int bind_afalg(ENGINE *e) {
 #ifdef AFALG_DIGESTS
     ret = ret && ENGINE_set_digests(e, afalg_digests);
 #endif
+    ret = ret && ENGINE_set_RSA(e, afalg_rsa_methods);
+
     return ret;
 }
 
