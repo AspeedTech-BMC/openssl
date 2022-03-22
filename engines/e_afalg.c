@@ -981,7 +981,7 @@ static void prepare_cipher_methods(void)
             break;
         case EVP_CIPH_ECB_MODE:
             do_cipher = afalg_do_cipher;
-            selected_ciphers[i] = 0;
+//            selected_ciphers[i] = 0;
             break;
         default:
             cipher_driver_info[i].status = AFALG_STATUS_FAILURE;
@@ -1590,7 +1590,7 @@ static void prepare_digest_methods(void)
     for (i = 0, known_digest_nids_amount = 0; i < OSSL_NELEM(digest_data);
          i++) {
 
-        selected_digests[i] = 0;
+        selected_digests[i] = 1;
         /*
          * Check that the digest is usable
          */
