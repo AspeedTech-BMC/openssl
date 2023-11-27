@@ -76,6 +76,8 @@ static size_t zc_maxsize, pagemask;
 #define AFALG_USE_SOFTWARE        1 /* allow software drivers */
 #define AFALG_REJECT_SOFTWARE     2 /* only disallow confirmed software drivers */
 
+#define AFALG_DEFAULT_USE_SOFTDRIVERS	AFALG_USE_SOFTWARE
+
 #ifndef AFALG_DEFAULT_USE_SOFTDRIVERS
 # define AFALG_DEFAULT_USE_SOFTDRIVERS AFALG_REJECT_SOFTWARE
 #endif
