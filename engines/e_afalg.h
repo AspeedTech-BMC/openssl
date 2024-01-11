@@ -15,12 +15,14 @@
 #  pragma GCC diagnostic ignored "-Wvariadic-macros"
 # endif
 
+//#define ALG_DEBUG
+
 # ifdef ALG_DEBUG
-#  define ALG_DGB(x, ...) fprintf(stderr, "ALG_DBG: " x, __VA_ARGS__)
+#  define ALG_DBG(x, ...) fprintf(stderr, "ALG_DBG: " x, __VA_ARGS__)
 #  define ALG_INFO(x, ...) fprintf(stderr, "ALG_INFO: " x, __VA_ARGS__)
 #  define ALG_WARN(x, ...) fprintf(stderr, "ALG_WARN: " x, __VA_ARGS__)
 # else
-#  define ALG_DGB(x, ...)
+#  define ALG_DBG(x, ...)
 #  define ALG_INFO(x, ...)
 #  define ALG_WARN(x, ...)
 # endif
