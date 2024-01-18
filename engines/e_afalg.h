@@ -40,7 +40,7 @@
                 } while(0)
 
 # ifndef AES_BLOCK_SIZE
-#  define AES_BLOCK_SIZE   16
+# define AES_BLOCK_SIZE   16
 # endif
 # define AES_KEY_SIZE_128 16
 # define AES_KEY_SIZE_192 24

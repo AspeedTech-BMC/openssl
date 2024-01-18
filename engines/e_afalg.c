@@ -2126,7 +2126,7 @@ static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
         /* Hardware failed, use software */
         const RSA_METHOD *meth = RSA_PKCS1_OpenSSL();
         ret = RSA_meth_get_bn_mod_exp(meth)(r, a, p, m, ctx, in_mont);
-        ALG_ERR("%s: hardware failed, use software\n", __func__);
+        ALG_WARN("%s: hardware failed, use software\n", __func__);
 
         goto init_fail;
     }
