@@ -375,6 +375,10 @@ struct cipher_ctx {
     unsigned char partial[EVP_MAX_BLOCK_LENGTH];
 };
 
+#ifndef OPENSSL_NO_DES
+#define OPENSSL_NO_DES
+#endif
+
 static const struct cipher_data_st cipher_data[] = {
 #ifndef OPENSSL_NO_DES
     { NID_des_cbc, 8, 8, 8, EVP_CIPH_CBC_MODE, "cbc(des)",
