@@ -249,7 +249,7 @@ static int prepare_afalg_alg_list(void)
 
     ret = -EFAULT;
     list_count = 0;
-    for (res_n = (struct nlmsghdr *)buf; (ret = NLMSG_OK(res_n, msg_len));
+    for (res_n = (struct nlmsghdr *)buf; (ret = NLMSG_OK(res_n, (__u32)msg_len));
          res_n = NLMSG_NEXT(res_n, msg_len)) {
         if (res_n->nlmsg_type == NLMSG_ERROR) {
             ret = 0;
@@ -1835,7 +1835,7 @@ struct rsa_ctx {
 };
 
 static RSA_METHOD *afalg_rsa_methods;
-struct rsa_ctx *rsa_ctx = NULL;
+static struct rsa_ctx *rsa_ctx = NULL;
 
 /* For kernel-6.6 */
 #define ALG_SET_PUBKEY          8
@@ -1843,7 +1843,7 @@ struct rsa_ctx *rsa_ctx = NULL;
 #define _tag(CLASS, CP, TAG)    \
         (uint8_t)((V_ASN1_##CLASS << 6) | ((V_ASN1_##CP & 0x20) << 5) | V_ASN1_##TAG)
 
-int dbg_dump = 0;
+static int dbg_dump = 0;
 
 static void hex_dump(char *name, u_char *str, int len)
 {
