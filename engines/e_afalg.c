@@ -660,7 +660,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
 
 #ifndef AFALG_NO_FALLBACK
-    if (inl < cipher_ctx->fb_threshold) {
+    if (inl < (size_t)cipher_ctx->fb_threshold) {
         ALG_DBG("%s: inl(%zu) < fb_threshold(%d), do_fb_cipher()\n",
                 __func__, inl, cipher_ctx->fb_threshold);
 
@@ -1033,12 +1033,14 @@ static void prepare_cipher_methods(void)
 
             if (cipher_data[i].fallback) {
                 ret = prepare_cipher_fallback(i, 0);
-                if (!ret)
-                        ALG_DBG("prepare cipher fallback dec [%zu] failed\n", i);
+                if (!ret) {
+                    ALG_DBG("prepare cipher fallback dec [%zu] failed\n", i);
+                }
 
                 ret = prepare_cipher_fallback(i, 1);
-                if (!ret)
-                        ALG_DBG("prepare cipher fallback enc [%zu] failed\n", i);
+                if (!ret){
+                    ALG_DBG("prepare cipher fallback enc [%zu] failed\n", i);
+                }
 
                 cipher_fb_threshold[i] = cipher_data[i].fb_threshold;
             }
@@ -1408,7 +1410,7 @@ static int afalg_do_digest(EVP_MD_CTX *ctx, const void *data, size_t len,
 
 #ifndef AFALG_NO_FALLBACK
     if (digest_ctx->sfd == -1 && digest_ctx->fallback && !more
-        && len < digest_ctx->fb_threshold
+        && len < (size_t)digest_ctx->fb_threshold
         && digest_use_fb(digest_ctx->fallback, data, len, digest_ctx->res))
            return 1;
 #endif
@@ -1896,7 +1898,7 @@ static int ber_wr_int(uint8_t **ber_ptr, uint8_t *src, size_t sz)
 }
 
 /* calculate the size of the length field itself in BER encoding */
-size_t ber_enc_len(size_t len)
+static size_t ber_enc_len(size_t len)
 {
         size_t sz;
 
