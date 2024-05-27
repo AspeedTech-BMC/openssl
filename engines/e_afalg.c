@@ -10,8 +10,8 @@
 /* We need to use some deprecated APIs */
 #define OPENSSL_SUPPRESS_DEPRECATED
 
-//#define AFALG_NO_FALLBACK
-//#define AFALG_ZERO_COPY
+/* #define AFALG_NO_FALLBACK */
+/* #define AFALG_ZERO_COPY */
 
 #ifdef AFALG_ZERO_COPY
 /* Required for vmsplice */
@@ -501,7 +501,7 @@ static int afalg_set_control(struct msghdr *msg, int op,
 
     cmsg = CMSG_FIRSTHDR(msg);
     if (cmsg == NULL) {
-        fprintf(stderr, "%s: CMSG_FIRSTHDR error setting op.\n", __func__);
+        ALG_WARN("%s: CMSG_FIRSTHDR error setting op.\n", __func__);
         goto err;
     }
 
@@ -514,7 +514,7 @@ static int afalg_set_control(struct msghdr *msg, int op,
 
     cmsg = CMSG_NXTHDR(msg, cmsg);
     if (cmsg == NULL) {
-        fprintf(stderr, "%s: CMSG_NXTHDR error setting iv.\n", __func__);
+        ALG_WARN("%s: CMSG_NXTHDR error setting iv.\n", __func__);
         goto err;
     }
 
@@ -541,8 +541,9 @@ static int cipher_fb_threshold[OSSL_NELEM(cipher_data)] = { 0, };
 
 static int prepare_cipher_fallback(int i, int enc)
 {
-    cipher_fb_ctx[i][enc] = EVP_CIPHER_CTX_new();
     int ret;
+
+    cipher_fb_ctx[i][enc] = EVP_CIPHER_CTX_new();
 
     if (!cipher_fb_ctx[i][enc])
         return 0;
@@ -552,7 +553,7 @@ static int prepare_cipher_fallback(int i, int enc)
         return 1;
     }
 
-    ALG_ERR("%s: cipher init error\n", __func__);
+    ALG_WARN("%s: cipher init error\n", __func__);
     EVP_CIPHER_CTX_free(cipher_fb_ctx[i][enc]);
     cipher_fb_ctx[i][enc] = NULL;
 
@@ -567,7 +568,7 @@ static int cipher_fb_init(struct cipher_ctx *cipher_ctx,
     /* Now we can set key and IV */
     if (!EVP_CipherInit_ex2(source_ctx, NULL, key, iv, enc, NULL)) {
             /* Error */
-            ALG_ERR("%s: cipher_init() error\n", __func__);
+            ALG_WARN("%s: cipher_init() error\n", __func__);
             EVP_CIPHER_CTX_free(source_ctx);
             return 0;
     }
@@ -663,15 +664,16 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     int op = EVP_CIPHER_CTX_encrypting(ctx) ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
     int ivlen = EVP_CIPHER_CTX_iv_length(ctx);
     unsigned char *iv = EVP_CIPHER_CTX_iv_noconst(ctx);
+#ifndef AFALG_NO_FALLBACK
+    const EVP_CIPHER *fb_cipher;
+    int (*fb_do_cipher) (EVP_CIPHER_CTX *ctx, unsigned char *out,
+                             const unsigned char *in, size_t inl);
+#endif
 
 #ifndef AFALG_NO_FALLBACK
     if (inl < (size_t)cipher_ctx->fb_threshold) {
         ALG_DBG("%s: inl(%zu) < fb_threshold(%d), do_fb_cipher()\n",
                 __func__, inl, cipher_ctx->fb_threshold);
-
-        const EVP_CIPHER *fb_cipher;
-        int (*fb_do_cipher) (EVP_CIPHER_CTX *ctx, unsigned char *out,
-                             const unsigned char *in, size_t inl);
 
         if ((fb_cipher = EVP_CIPHER_CTX_cipher(cipher_ctx->fallback))
             && (fb_do_cipher = EVP_CIPHER_meth_get_do_cipher(fb_cipher))) {
@@ -727,7 +729,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
             perror("afalg_do_cipher: sendmsg");
             goto out;
         } else if (res != (ssize_t) inl) {
-            fprintf(stderr, "afalg_do_cipher: sent %zd bytes != len %zd\n",
+            fprintf(stderr, "afalg_do_cipher: sent 0x%lx bytes != len 0x%lx\n",
                     res, inl);
             goto out;
         }
@@ -736,7 +738,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     if ((res = read(cipher_ctx->sfd, out, inl)) == (ssize_t) inl)
         ret = 1;
     else
-        fprintf(stderr, "afalg_do_cipher: read %zd bytes != len %zd\n",
+        fprintf(stderr, "afalg_do_cipher: read 0x%lx bytes != len 0x%lx\n",
                 res, inl);
 
 out:
@@ -889,7 +891,7 @@ static int cipher_ctrl(EVP_CIPHER_CTX *ctx, int type, int p1, void* p2)
         }
 #endif
         if ((to_cipher_ctx->bfd = dup(cipher_ctx->bfd)) == -1) {
-            perror(__func__);
+            ALG_WARN("%s\n", __func__);
             return 0;
         }
         if ((to_cipher_ctx->sfd = accept(to_cipher_ctx->bfd, NULL, 0)) != -1)
@@ -1460,7 +1462,7 @@ static int digest_update(EVP_MD_CTX *ctx, const void *data, size_t len)
     new_data = OPENSSL_realloc(digest_ctx->inp_data,
                                digest_ctx->inp_len + len);
     if (!new_data) {
-        perror(__func__);
+        ALG_WARN("%s\n", __func__);
         return 0;
     }
     memcpy(new_data + digest_ctx->inp_len, data, len);
@@ -1526,7 +1528,7 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
     if (digest_from->inp_len > 0) {
         digest_to->inp_data = OPENSSL_malloc(digest_from->inp_len);
         if (digest_to->inp_data == NULL) {
-           perror(__func__);
+           ALG_WARN("%s\n", __func__);
            digest_to->inp_len = 0;
 
            return 0;
@@ -1545,7 +1547,7 @@ static int digest_copy(EVP_MD_CTX *to, const EVP_MD_CTX *from)
         return 0;
 #endif
     if ((digest_to->bfd = dup(digest_from->bfd)) == -1) {
-        perror(__func__);
+        ALG_WARN("%s\n", __func__);
         goto fail;
     }
 
@@ -1852,16 +1854,19 @@ static int dbg_dump = 0;
 
 static void hex_dump(char *name, u_char *str, int len)
 {
-        if (!dbg_dump)
-                return;
+	int i;
 
-        printf("Hex dump %s (len:%d):", name, len);
-        for (int i = 0; i < len; i++) {
-                if (i % 16 == 0)
-                        printf("\n");
-                printf("0x%02x ", str[i]);
-        }
-        printf("\n\n");
+	if (!dbg_dump)
+		return;
+
+	printf("Hex dump %s (len:%d):", name, len);
+	for (i = 0; i < len; i++)
+	{
+		if (i % 16 == 0)
+			printf("\n");
+		printf("0x%02x ", str[i]);
+	}
+	printf("\n\n");
 }
 
 static int ber_wr_tag(uint8_t **ber_ptr, uint8_t tag)
@@ -1945,7 +1950,7 @@ static int asn1_ber_encoding(void)
 
     rsa_ctx->ber_key = OPENSSL_zalloc(rsa_ctx->ber_key_len);
     if (!rsa_ctx->ber_key) {
-            printf("%s: ber key allocation failed\n", __func__);
+            ALG_WARN("%s: ber key allocation failed\n", __func__);
             return -EINVAL;
     }
 
@@ -1961,7 +1966,7 @@ static int asn1_ber_encoding(void)
           ber_wr_len(&ber_ptr, e_sz, e_enc_len)                         ||
           ber_wr_int(&ber_ptr, rsa_ctx->e, e_sz);
     if (err) {
-        printf("%s: gen ber key failed\n", __func__);
+        ALG_WARN("%s: gen ber key failed\n", __func__);
         goto free_key;
     }
 
@@ -1986,7 +1991,7 @@ static int afalg_set_pubkey(const BIGNUM *e, const BIGNUM *n)
     len = len_e = BN_num_bytes(e);
     key = OPENSSL_zalloc(len);
     if (!len || !key) {
-        printf("%s: key allocation failed\n", __func__);
+        ALG_WARN("%s: key allocation failed\n", __func__);
         goto err;
     }
 
@@ -2022,7 +2027,7 @@ static int afalg_set_pubkey(const BIGNUM *e, const BIGNUM *n)
     /* Convert key to BER format */
     ret = asn1_ber_encoding();
     if (ret) {
-        printf("%s: asn1 ber encoding failed\n", __func__);
+        ALG_WARN("%s: asn1 ber encoding failed\n", __func__);
         goto err;
     }
 
@@ -2049,7 +2054,7 @@ static int afalg_asym_cipher_init(BIGNUM *e, BIGNUM *n)
     if (!rsa_ctx) {
         rsa_ctx = OPENSSL_malloc(sizeof(struct rsa_ctx));
         if (!rsa_ctx) {
-            printf("%s: rsa_ctx allocation failed\n", __func__);
+            ALG_WARN("%s: rsa_ctx allocation failed\n", __func__);
             return -ENOMEM;
         }
     }
@@ -2060,13 +2065,13 @@ static int afalg_asym_cipher_init(BIGNUM *e, BIGNUM *n)
 
     if (rsa_ctx->bfd < 0) {
         SYSerr(SYS_F_BIND, errno);
-        printf("%s: bind afalg socket failed\n", __func__);
+        ALG_WARN("%s: bind afalg socket failed\n", __func__);
         return errno;
     }
 
     if ((rsa_ctx->sfd = accept(rsa_ctx->bfd, NULL, 0)) < 0) {
         ret = rsa_ctx->sfd;
-        printf("%s: accept afalg socket failed\n", __func__);
+        ALG_WARN("%s: accept afalg socket failed\n", __func__);
         goto accept_fail;
     }
 
@@ -2145,7 +2150,7 @@ static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     op = ALG_OP_ENCRYPT;
     ret = afalg_set_control(&msg, op, NULL, 0);
     if (!ret) {
-        printf("%s: set control failed\n", __func__);
+        ALG_WARN("%s: set control failed\n", __func__);
         goto init_fail;
     }
 
@@ -2161,7 +2166,7 @@ static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     bin_a = OPENSSL_zalloc(len_m);
     bin_r = OPENSSL_zalloc(len_r);
     if (!bin_a || !bin_r) {
-        printf("%s: allocate a/r failed\n", __func__);
+        ALG_WARN("%s: allocate a/r failed\n", __func__);
         goto fail;
     }
 
@@ -2177,7 +2182,7 @@ static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     msg.msg_iovlen = 1;
 
     if ((ret = sendmsg(rsa_ctx->sfd, &msg, 0)) < 0) {
-            fprintf(stderr, "%s: sendmsg failed, ret:0x%x, errno:0x%x\n",
+            ALG_WARN("%s: sendmsg failed, ret:0x%x, errno:0x%x\n",
                         __func__, ret, errno);
         ret = 0;
             goto fail;
@@ -2188,7 +2193,7 @@ static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     iov.iov_len = len_r;
 
     if ((ret = read(rsa_ctx->sfd, bin_r, len_r)) < 0) {
-        fprintf(stderr, "%s: recvmsg failed, ret:0x%x, errno:0x%x\n",
+        ALG_WARN("%s: recvmsg failed, ret:0x%x, errno:0x%x\n",
                 __func__, ret, errno);
         ret = 0;
         goto fail;
@@ -2199,7 +2204,7 @@ static int afalg_bn_mod_exp(BIGNUM *r, const BIGNUM *a, const BIGNUM *p,
     ALG_DBG("%s: recvmsg, len:0x%x, ret:0x%x\n", __func__, len_r, ret);
 
     BN_bin2bn(bin_r, ret, r);
-    ret = 1;    // successful
+    ret = 1;    /* successful */
 
 fail:
     if (msg.msg_control)
@@ -2225,7 +2230,7 @@ static void prepare_asym_cipher_methods(void)
         || !RSA_meth_set_flags(afalg_rsa_methods, 0)
         || !RSA_meth_set_bn_mod_exp(afalg_rsa_methods, afalg_bn_mod_exp)
         ) {
-            fprintf(stderr, "%s: allocate RSA methods failed\n", __func__);
+            ALG_WARN("%s: allocate RSA methods failed\n", __func__);
             RSA_meth_free(afalg_rsa_methods);
             afalg_rsa_methods = NULL;
             return;
