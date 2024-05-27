@@ -102,6 +102,11 @@ struct driver_info_st {
     } accelerated;
 };
 
+void engine_load_afalg_int(void);
+void engine_load_afalg_int(void)
+{
+}
+
 static int get_afalg_socket(const char *salg_name, const char *salg_type,
                             const __u32 feat, const __u32 mask)
 {
