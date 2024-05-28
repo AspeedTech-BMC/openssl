@@ -731,7 +731,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
             goto out;
         } else if (res != (size_t) inl) {
             ALG_ERR("afalg_do_cipher: sent 0x%x bytes != len 0x%x\n",
-                    res, inl);
+                    (__u32)res, (__u32)inl);
             goto out;
         }
     }
@@ -740,7 +740,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         ret = 1;
     else
         ALG_ERR("afalg_do_cipher: read 0x%x bytes != len 0x%x\n",
-                res, inl);
+                (__u32)res, (__u32)inl);
 
 out:
     if (msg.msg_control)
