@@ -660,7 +660,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         (struct cipher_ctx *)EVP_CIPHER_CTX_get_cipher_data(ctx);
     struct msghdr msg = { 0 };
     struct iovec iov;
-    ssize_t res = -1;
+    size_t res = -1;
     int ret = 0;
     int op = EVP_CIPHER_CTX_encrypting(ctx) ? ALG_OP_ENCRYPT : ALG_OP_DECRYPT;
     int ivlen = EVP_CIPHER_CTX_iv_length(ctx);
@@ -729,17 +729,17 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         if ((res = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
             printf("afalg_do_cipher: sendmsg");
             goto out;
-        } else if (res != (ssize_t) inl) {
-            ALG_ERR("afalg_do_cipher: sent 0x%lx bytes != len 0x%lx\n",
+        } else if (res != (size_t) inl) {
+            ALG_ERR("afalg_do_cipher: sent 0x%x bytes != len 0x%x\n",
                     res, inl);
             goto out;
         }
     }
 
-    if ((res = read(cipher_ctx->sfd, out, inl)) == (ssize_t) inl)
+    if ((res = read(cipher_ctx->sfd, out, inl)) == (size_t) inl)
         ret = 1;
     else
-        ALG_ERR("afalg_do_cipher: read 0x%lx bytes != len 0x%lx\n",
+        ALG_ERR("afalg_do_cipher: read 0x%x bytes != len 0x%x\n",
                 res, inl);
 
 out:
