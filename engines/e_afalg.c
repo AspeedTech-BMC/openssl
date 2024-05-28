@@ -27,6 +27,7 @@ static size_t zc_maxsize, pagemask;
 #include <asm/types.h>
 #include <assert.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -195,14 +196,14 @@ static int prepare_afalg_alg_list(void)
     nlfd =  socket(AF_NETLINK, SOCK_RAW, NETLINK_CRYPTO);
     if (nlfd < 0) {
         if (errno != EPROTONOSUPPORT) /* crypto_user module not available */
-            perror("Netlink error: cannot open netlink socket");
+            printf("Netlink error: cannot open netlink socket");
         return -errno;
     }
 
     memset(&nl, 0, sizeof(nl));
     nl.nl_family = AF_NETLINK;
     if (bind(nlfd, (struct sockaddr*)&nl, sizeof(nl)) < 0) {
-        perror("Netlink error: cannot bind netlink socket");
+        printf("Netlink error: cannot bind netlink socket");
         ret = -errno;
         goto out;
     }
@@ -217,7 +218,7 @@ static int prepare_afalg_alg_list(void)
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
     if (sendmsg(nlfd, &msg, 0) < 0) {
-        perror("Netlink error: sendmsg failed");
+        printf("Netlink error: sendmsg failed");
         ret = -errno;
         goto out;
     }
@@ -236,15 +237,15 @@ static int prepare_afalg_alg_list(void)
             if (errno == EINTR || errno == EAGAIN)
                 continue;
             if (msg_len == 0)
-                perror("Nelink error: no data");
+                printf("Nelink error: no data");
             else
-                perror("Nelink error: netlink receive error");
+                printf("Nelink error: netlink receive error");
             ret = -errno;
             goto out;
         }
 
         if ((u_int32_t)msg_len > buf_size) {
-            perror("Netlink error: received too much data");
+            printf("Netlink error: received too much data");
             ret = -errno;
             goto out;
         }
@@ -495,7 +496,7 @@ static int afalg_set_control(struct msghdr *msg, int op,
                           + (ivlen > 0 ? CMSG_SPACE(set_iv_len) : 0);
     msg->msg_control = OPENSSL_zalloc(msg->msg_controllen);
     if (msg->msg_control == NULL) {
-        perror("afalg_set_control: OPENSSL_zalloc");
+        printf("afalg_set_control: OPENSSL_zalloc");
         return 0;
     }
 
@@ -613,14 +614,14 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     if (key != NULL) {
         if ((keylen = EVP_CIPHER_CTX_key_length(ctx)) > 0
             && !afalg_set_key(cipher_ctx->bfd, key, keylen, ALG_SET_KEY)) {
-            fprintf(stderr, "cipher_init: Error setting key.\n");
+            printf("cipher_init: Error setting key.\n");
             goto err;
         }
 #ifndef AFALG_NO_FALLBACK
         if (cipher_fb_ctx[i][enc]) {
             if (!cipher_fb_init(cipher_ctx, cipher_fb_ctx[i][enc], key, iv,
                                 enc)) {
-                fprintf(stderr, "cipher_init: Warning: Cannot set fallback key."
+                printf("cipher_init: Warning: Cannot set fallback key."
                                 " Fallback will not be used!\n");
             } else {
                 cipher_ctx->fb_threshold = cipher_fb_threshold[i];
@@ -630,13 +631,13 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
     }
 
     if ((cipher_ctx->sfd = accept(cipher_ctx->bfd, NULL, 0)) < 0) {
-        perror("cipher_init: accept");
+        printf("cipher_init: accept");
         goto err;
     }
 
 #ifdef AFALG_ZERO_COPY
     if (pipe(cipher_ctx->pipes) < 0) {
-        perror("cipher_init: pipes");
+        printf("cipher_init: pipes");
         goto err;
     }
 #endif
@@ -696,13 +697,13 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 #ifdef AFALG_ZERO_COPY
     if (inl <= zc_maxsize && ((size_t)in & pagemask) == 0) {
         if (msg.msg_control && sendmsg(cipher_ctx->sfd, &msg, 0) < 0) {
-            perror ("afalg_do_cipher: sendmsg");
+            printf ("afalg_do_cipher: sendmsg");
             goto out;
         }
         res = vmsplice(cipher_ctx->pipes[1], &iov, 1,
                        SPLICE_F_GIFT & SPLICE_F_MORE);
         if (res < 0) {
-            perror("afalg_do_cipher: vmsplice");
+            printf("afalg_do_cipher: vmsplice");
             goto out;
         } else if (res != (ssize_t) inl) {
             fprintf(stderr,
@@ -712,7 +713,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         }
         res = splice(cipher_ctx->pipes[0], NULL, cipher_ctx->sfd, NULL, inl, 0);
         if (res < 0) {
-            perror("afalg_do_cipher: splice");
+            printf("afalg_do_cipher: splice");
             goto out;
         } else if (res != (ssize_t) inl) {
             fprintf(stderr,
@@ -726,10 +727,10 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
         msg.msg_iov = &iov;
         msg.msg_iovlen = 1;
         if ((res = sendmsg(cipher_ctx->sfd, &msg, 0)) < 0) {
-            perror("afalg_do_cipher: sendmsg");
+            printf("afalg_do_cipher: sendmsg");
             goto out;
         } else if (res != (ssize_t) inl) {
-            fprintf(stderr, "afalg_do_cipher: sent 0x%lx bytes != len 0x%lx\n",
+            ALG_ERR("afalg_do_cipher: sent 0x%lx bytes != len 0x%lx\n",
                     res, inl);
             goto out;
         }
@@ -738,7 +739,7 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
     if ((res = read(cipher_ctx->sfd, out, inl)) == (ssize_t) inl)
         ret = 1;
     else
-        fprintf(stderr, "afalg_do_cipher: read 0x%lx bytes != len 0x%lx\n",
+        ALG_ERR("afalg_do_cipher: read 0x%lx bytes != len 0x%lx\n",
                 res, inl);
 
 out:
@@ -1150,7 +1151,7 @@ static int afalg_select_cipher_cb(const char *str, int len, void *usr)
 
     EVP = EVP_get_cipherbyname(name);
     if (EVP == NULL) {
-        fprintf(stderr, "afalg: unknown cipher %s\n", name);
+        ALG_ERR("afalg: unknown cipher %s\n", name);
     } else if ((i = find_cipher_data_index(EVP_CIPHER_nid(EVP))) != (size_t)-1) {
         cipher_list[i] = 1;
 #ifndef AFALG_NO_FALLBACK
@@ -1159,7 +1160,7 @@ static int afalg_select_cipher_cb(const char *str, int len, void *usr)
         }
 #endif
     } else {
-        fprintf(stderr, "afalg: cipher %s not available\n", name);
+        ALG_ERR("afalg: cipher %s not available\n", name);
     }
 
     OPENSSL_free(name);
@@ -1195,17 +1196,17 @@ static void dump_cipher_info(void)
         } else {
             driver_name = "unknown";
         }
-        fprintf(stderr, ", driver=%s", driver_name);
+        ALG_ERR(", driver=%s", driver_name);
 #endif
         if (cipher_driver_info[i].accelerated == AFALG_ACCELERATED)
             fprintf (stderr, " (hw accelerated)");
         else if (cipher_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
-            fprintf(stderr, " (software)");
+            printf(" (software)");
         else
-            fprintf(stderr, " (acceleration status unknown)");
+            printf(" (acceleration status unknown)");
 #ifndef AFALG_NO_FALLBACK
         if (cipher_data[i].fallback) {
-            fprintf(stderr, ", sw fallback available, default threshold=%d",
+            ALG_ERR(", sw fallback available, default threshold=%d",
                     cipher_data[i].fb_threshold);
         }
 #endif
@@ -1213,7 +1214,7 @@ static void dump_cipher_info(void)
             fprintf (stderr, ". Cipher setup failed.");
         fprintf (stderr, "\n");
     }
-    fprintf(stderr, "\n");
+    printf("\n");
 }
 
 #ifndef AFALG_DIGESTS
@@ -1763,7 +1764,7 @@ static int afalg_select_digest_cb(const char *str, int len, void *usr)
 
     EVP = EVP_get_digestbyname(name);
     if (EVP == NULL) {
-        fprintf(stderr, "afalg: unknown digest %s\n", name);
+        ALG_ERR("afalg: unknown digest %s\n", name);
     } else if ((i = find_digest_data_index(EVP_MD_type(EVP))) != (size_t)-1) {
         digest_list[i] = 1;
 #ifndef AFALG_NO_FALLBACK
@@ -1772,7 +1773,7 @@ static int afalg_select_digest_cb(const char *str, int len, void *usr)
         }
 #endif
     } else {
-        fprintf(stderr, "afalg: digest %s not available\n", name);
+        ALG_ERR("afalg: digest %s not available\n", name);
     }
     OPENSSL_free(name);
     return 1;
@@ -1807,19 +1808,19 @@ static void dump_digest_info(void)
         } else {
             driver_name = "unknown";
         }
-        fprintf(stderr, ", driver=%s", driver_name);
+        ALG_ERR(", driver=%s", driver_name);
 #endif
         if (digest_driver_info[i].accelerated == AFALG_ACCELERATED)
             fprintf (stderr, " (hw accelerated)");
         else if (digest_driver_info[i].accelerated == AFALG_NOT_ACCELERATED)
-            fprintf(stderr, " (software)");
+            printf(" (software)");
         else
-            fprintf(stderr, " (acceleration status unknown)");
+            printf(" (acceleration status unknown)");
         if (digest_driver_info[i].status == AFALG_STATUS_FAILURE)
             fprintf (stderr, ". Digest setup failed.");
         fprintf (stderr, "\n");
     }
-    fprintf(stderr, "\n");
+    printf("\n");
 }
 
 #endif /* AFALG_DIGESTS */
@@ -2318,7 +2319,7 @@ static int afalg_ctrl(ENGINE *e, int cmd, long i, void *p, void (*f) (void))
         case AFALG_REJECT_SOFTWARE:
             break;
         default:
-            fprintf(stderr, "afalg: invalid value (%ld) for USE_SOFTDRIVERS\n", i);
+            ALG_ERR("afalg: invalid value (%ld) for USE_SOFTDRIVERS\n", i);
             return 0;
         }
 
@@ -2460,7 +2461,7 @@ static int test_afalg_socket(void)
     /* Test if we can actually create an AF_ALG socket */
     sock = socket(AF_ALG, SOCK_SEQPACKET, 0);
     if (sock == -1) {
-        fprintf(stderr, "Could not create AF_ALG socket: %s\n", strerror(errno));
+        ALG_ERR("Could not create AF_ALG socket: %s\n", strerror(errno));
         return 0;
     }
 
