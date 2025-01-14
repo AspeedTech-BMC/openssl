@@ -148,6 +148,45 @@ static int afalg_closefd(int fd)
     return ret;
 }
 
+static int max_sendbuf_size = 0;
+static int set_sendbuf_size(int fd)
+{
+    int ret = -1, snd_len, rlen;
+    socklen_t optlen = sizeof(snd_len);
+    FILE *fp;
+    char buf[32], *end;
+
+    fp = fopen("/proc/sys/net/core/wmem_max", "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to open /proc/sys/net/core/wmem_max\n");
+        return ret;
+    }
+    rlen = fread(buf, 1, sizeof(buf), fp);
+    fclose(fp);
+    if (rlen <= 0) {
+        fprintf(stderr, "Failed to read /proc/sys/net/core/wmem_max\n");
+        return ret;
+    }
+
+    snd_len = strtol(buf, &end, 10);
+    if ((errno == ERANGE && (snd_len == LONG_MAX || snd_len == LONG_MIN))
+        || (errno != 0 && snd_len == 0)) {
+        fprintf(stderr, "Invalid wmem_max value (%s)\n", buf);
+        return ret;
+    }
+
+    /* max send buffer size is twice wmem_max */
+    snd_len *= 2;
+    ret = setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd_len, optlen);
+    if (ret) {
+        fprintf(stderr, "setsockopt is failed, errno = %d\n", errno);
+        return ret;
+    }
+
+    max_sendbuf_size = snd_len;
+    return 0;
+}
+
 struct afalg_alg_info {
     char alg_name[CRYPTO_MAX_NAME];
     char driver_name[CRYPTO_MAX_NAME];
@@ -635,6 +674,9 @@ static int cipher_init(EVP_CIPHER_CTX *ctx, const unsigned char *key,
         goto err;
     }
 
+    if (set_sendbuf_size(cipher_ctx->sfd))
+        goto err;
+
 #ifdef AFALG_ZERO_COPY
     if (pipe(cipher_ctx->pipes) < 0) {
         printf("cipher_init: pipes");
@@ -671,6 +713,11 @@ static int afalg_do_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
                              const unsigned char *in, size_t inl);
 #endif
 
+    if (max_sendbuf_size < inl) {
+        fprintf(stderr, "Input data size (%d) is too big to send to Kernel driver.\n", inl);
+        fprintf(stderr, "Please enlarge the wmem_max (/proc/sys/net/core/wmem_max) for further test\n");
+        return -1;
+    }
 #ifndef AFALG_NO_FALLBACK
     if (inl < (size_t)cipher_ctx->fb_threshold) {
         ALG_DBG("%s: inl(%zu) < fb_threshold(%d), do_fb_cipher()\n",
